@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""
+Slack Skill — Read/write Slack workspace via Slack Web API.
+
+Setup:
+  1. Create Slack App: https://api.slack.com/apps → Create New App → From scratch
+  2. Name: "Claude Assistant" (or any), Workspace: KAIST MLML
+  3. OAuth & Permissions → User Token Scopes (NOT bot scopes):
+     - channels:history, channels:read
+     - groups:history, groups:read
+     - im:history, im:read
+     - mpim:history, mpim:read
+     - search:read, users:read, chat:write
+  4. Install to Workspace → copy "User OAuth Token" (xoxp-...)
+  5. Run: slack link <token>
+
+Usage:
+  slack whoami              # 본인 정보
+  slack mentions [--days N] # @mention + DM unread
+  slack dms                 # 모든 DM 대화 (unread)
+  slack channels            # 가입 채널 list
+  slack send <channel|@user> "<message>"
+  slack history <channel> [--limit N]
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone, timedelta
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+from urllib.error import HTTPError
+
+# --- Config ---
+
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_user_path = os.path.join(_script_dir, ".user")
+
+BASE = "https://slack.com/api"
+
+
+def _token():
+    user = _load_user()
+    if not user or not user.get("token"):
+        print("Not linked. Run 'slack link <user_oauth_token>' first.")
+        sys.exit(1)
+    return user["token"]
+
+
+def _headers():
+    return {
+        "Authorization": f"Bearer {_token()}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+
+def _get(method, **params):
+    url = f"{BASE}/{method}"
+    if params:
+        url += "?" + urlencode(params)
+    req = Request(url, headers={"Authorization": f"Bearer {_token()}"})
+    with urlopen(req) as resp:
+        data = json.loads(resp.read())
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack API error: {data.get('error', 'unknown')}")
+    return data
+
+
+def _post(method, payload):
+    body = json.dumps(payload).encode()
+    req = Request(f"{BASE}/{method}", data=body, headers=_headers(), method="POST")
+    with urlopen(req) as resp:
+        data = json.loads(resp.read())
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack API error: {data.get('error', 'unknown')}")
+    return data
+
+
+def _save_user(token=None, team=None, user_id=None):
+    data = {}
+    if os.path.exists(_user_path):
+        with open(_user_path) as f:
+            data = json.load(f)
+    if token:
+        data["token"] = token
+    if team:
+        data["team"] = team
+    if user_id:
+        data["user_id"] = user_id
+    fd = os.open(_user_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+
+
+def _load_user():
+    if not os.path.exists(_user_path):
+        return None
+    with open(_user_path) as f:
+        return json.load(f)
+
+
+def _resolve_channel(name):
+    """Convert #channel or @user to channel_id."""
+    name = name.lstrip("#").lstrip("@")
+    # Try channel first
+    try:
+        for cur in _get("conversations.list", types="public_channel,private_channel,im,mpim", limit=1000).get("channels", []):
+            if cur.get("name") == name:
+                return cur["id"]
+    except Exception:
+        pass
+    # Try user (DM)
+    try:
+        for u in _get("users.list", limit=200).get("members", []):
+            if u.get("name") == name or u.get("profile", {}).get("display_name") == name:
+                # Open IM
+                r = _post("conversations.open", {"users": u["id"]})
+                return r["channel"]["id"]
+    except Exception:
+        pass
+    return None
+
+
+# --- Commands ---
+
+def cmd_link(args):
+    if not args.token:
+        print("  Usage: slack link <user_oauth_token>")
+        print("  Get token: https://api.slack.com/apps → OAuth & Permissions → User OAuth Token")
+        return
+    _save_user(token=args.token)
+    try:
+        r = _get("auth.test")
+        _save_user(team=r.get("team"), user_id=r.get("user_id"))
+        print(f"  Linked! team={r.get('team')} user={r.get('user')} url={r.get('url')}")
+    except Exception as e:
+        print(f"  Failed: {e}")
+
+
+def cmd_whoami(args):
+    user = _load_user()
+    if not user:
+        print("  Not linked.")
+        return
+    try:
+        r = _get("auth.test")
+        print(f"  team:   {r.get('team')}")
+        print(f"  user:   {r.get('user')}")
+        print(f"  uid:    {r.get('user_id')}")
+        print(f"  url:    {r.get('url')}")
+    except Exception as e:
+        print(f"  Failed: {e}")
+
+
+def cmd_channels(args):
+    r = _get("conversations.list", types="public_channel,private_channel", limit=200, exclude_archived="true")
+    channels = sorted(r.get("channels", []), key=lambda c: c.get("name", ""))
+    for c in channels:
+        member = "✓" if c.get("is_member") else " "
+        print(f"  {member} #{c['name']:<30} ({c.get('num_members', '?')} members)")
+
+
+def cmd_mentions(args):
+    user_id = _load_user().get("user_id")
+    if not user_id:
+        print("  Run 'slack whoami' first.")
+        return
+    # Search: mentions of self in last N days
+    query = f"<@{user_id}>"
+    r = _get("search.messages", query=query, count=20, sort="timestamp")
+    msgs = r.get("messages", {}).get("matches", [])
+    if not msgs:
+        print(f"  No mentions.")
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    for m in msgs:
+        ts = datetime.fromtimestamp(float(m["ts"]), tz=timezone.utc)
+        if ts < cutoff:
+            continue
+        user_name = m.get("username", m.get("user", "?"))
+        ch_name = m.get("channel", {}).get("name", "?")
+        text = m.get("text", "")[:80]
+        print(f"  {ts:%m-%d %H:%M}  @{user_name} in #{ch_name}: {text}")
+
+
+def cmd_dms(args):
+    """List recent IM (DM) channels with unread."""
+    r = _get("conversations.list", types="im", limit=50)
+    users_r = _get("users.list", limit=200)
+    user_map = {u["id"]: u.get("real_name") or u.get("name") for u in users_r.get("members", [])}
+    for c in r.get("channels", []):
+        if c.get("is_user_deleted"):
+            continue
+        peer = user_map.get(c.get("user"), c.get("user"))
+        unread = c.get("unread_count_display", 0)
+        if unread:
+            print(f"  💬 {peer} — unread {unread}")
+
+
+def cmd_send(args):
+    cid = _resolve_channel(args.target)
+    if not cid:
+        print(f"  Cannot resolve target: {args.target}")
+        return
+    r = _post("chat.postMessage", {"channel": cid, "text": args.message})
+    print(f"  Sent (ts={r.get('ts')})")
+
+
+def cmd_history(args):
+    cid = _resolve_channel(args.channel)
+    if not cid:
+        print(f"  Cannot resolve channel: {args.channel}")
+        return
+    r = _get("conversations.history", channel=cid, limit=args.limit)
+    users_r = _get("users.list", limit=200)
+    user_map = {u["id"]: u.get("name") for u in users_r.get("members", [])}
+    msgs = list(reversed(r.get("messages", [])))
+    for m in msgs:
+        ts = datetime.fromtimestamp(float(m["ts"]), tz=timezone.utc)
+        user = user_map.get(m.get("user"), m.get("user", "?"))
+        text = m.get("text", "")[:100]
+        print(f"  {ts:%m-%d %H:%M}  {user}: {text}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="slack")
+    sub = p.add_subparsers(dest="command")
+
+    pp = sub.add_parser("link")
+    pp.add_argument("token", nargs="?", default=None)
+
+    sub.add_parser("whoami")
+    sub.add_parser("channels")
+    sub.add_parser("dms")
+
+    pp = sub.add_parser("mentions")
+    pp.add_argument("--days", type=int, default=2)
+
+    pp = sub.add_parser("send")
+    pp.add_argument("target", help="#channel or @user")
+    pp.add_argument("message")
+
+    pp = sub.add_parser("history")
+    pp.add_argument("channel")
+    pp.add_argument("--limit", type=int, default=20)
+
+    args = p.parse_args()
+    if not args.command:
+        p.print_help()
+        return
+
+    cmds = {
+        "link": cmd_link, "whoami": cmd_whoami, "channels": cmd_channels,
+        "mentions": cmd_mentions, "dms": cmd_dms, "send": cmd_send,
+        "history": cmd_history,
+    }
+    cmds[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
