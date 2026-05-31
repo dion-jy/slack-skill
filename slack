@@ -101,20 +101,22 @@ def _load_user():
 
 
 def _resolve_channel(name):
-    """Convert #channel or @user to channel_id."""
+    """Convert #channel or @user to channel_id. Degrades per-type so a
+    missing scope (e.g. mpim) doesn't kill the whole lookup."""
     name = name.lstrip("#").lstrip("@")
-    # Try channel first
-    try:
-        for cur in _get("conversations.list", types="public_channel,private_channel,im,mpim", limit=1000).get("channels", []):
-            if cur.get("name") == name:
-                return cur["id"]
-    except Exception:
-        pass
-    # Try user (DM)
+    # Try channel types we likely have scope for, one at a time
+    for t in ("public_channel", "private_channel"):
+        try:
+            r = _get("conversations.list", types=t, limit=1000, exclude_archived="true")
+            for cur in r.get("channels", []):
+                if cur.get("name") == name:
+                    return cur["id"]
+        except Exception:
+            continue
+    # Try user (DM) — needs users:read; skip silently if missing
     try:
         for u in _get("users.list", limit=200).get("members", []):
             if u.get("name") == name or u.get("profile", {}).get("display_name") == name:
-                # Open IM
                 r = _post("conversations.open", {"users": u["id"]})
                 return r["channel"]["id"]
     except Exception:
@@ -184,11 +186,21 @@ def cmd_mentions(args):
         print(f"  {ts:%m-%d %H:%M}  @{user_name} in #{ch_name}: {text}")
 
 
+def _user_map(real_name=False):
+    """id->name map. Returns {} if users:read scope is missing (degrade gracefully)."""
+    try:
+        members = _get("users.list", limit=500).get("members", [])
+    except Exception:
+        return {}
+    if real_name:
+        return {u["id"]: (u.get("real_name") or u.get("name")) for u in members}
+    return {u["id"]: u.get("name") for u in members}
+
+
 def cmd_dms(args):
     """List recent IM (DM) channels with unread."""
     r = _get("conversations.list", types="im", limit=50)
-    users_r = _get("users.list", limit=200)
-    user_map = {u["id"]: u.get("real_name") or u.get("name") for u in users_r.get("members", [])}
+    user_map = _user_map(real_name=True)
     for c in r.get("channels", []):
         if c.get("is_user_deleted"):
             continue
@@ -213,8 +225,7 @@ def cmd_history(args):
         print(f"  Cannot resolve channel: {args.channel}")
         return
     r = _get("conversations.history", channel=cid, limit=args.limit)
-    users_r = _get("users.list", limit=200)
-    user_map = {u["id"]: u.get("name") for u in users_r.get("members", [])}
+    user_map = _user_map()
     msgs = list(reversed(r.get("messages", [])))
     for m in msgs:
         ts = datetime.fromtimestamp(float(m["ts"]), tz=timezone.utc)
