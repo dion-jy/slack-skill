@@ -4,7 +4,7 @@ Slack Skill — Read/write Slack workspace via Slack Web API.
 
 Setup:
   1. Create Slack App: https://api.slack.com/apps → Create New App → From scratch
-  2. Name: "Claude Assistant" (or any), Workspace: KAIST MLML
+  2. Name: "Claude Assistant" (or any), Workspace: your workspace
   3. OAuth & Permissions → User Token Scopes (NOT bot scopes):
      - channels:history, channels:read
      - groups:history, groups:read
@@ -15,11 +15,11 @@ Setup:
   5. Run: slack link <token>
 
 Usage:
-  slack whoami              # 본인 정보
-  slack mentions [--days N] # @mention + DM unread
-  slack dms                 # 모든 DM 대화 (unread)
-  slack channels            # 가입 채널 list
-  slack send <channel|@user> "<message>"
+  slack whoami              # account info
+  slack mentions [--days N] # @mentions + DM unread (needs search:read)
+  slack dms                 # DM conversations (unread)
+  slack channels            # joined channel list
+  slack send <channel|@user> "<message>"  # needs chat:write
   slack history <channel> [--limit N]
 """
 

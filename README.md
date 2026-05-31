@@ -1,53 +1,52 @@
 # Slack Skill
 
-KAIST MLML Slack workspace를 Claude Code agent가 read/write하는 CLI skill (Slack Web API).
+A tiny CLI to read/write a Slack workspace via the Slack Web API — designed to be used as a Claude Code agent skill (context source). Stdlib only, no dependencies.
 
-## Setup (3분)
+## Setup
 
-### 1. Slack App 만들기
+### 1. Create a Slack App
 
 1. https://api.slack.com/apps → **Create New App** → **From scratch**
-2. App Name: `Claude Assistant` (또는 임의), Workspace: **KAIST MLML**
-3. **OAuth & Permissions** 페이지로
-4. **User Token Scopes** 추가 (bot 아님):
+2. App Name: `Claude Assistant` (anything), Workspace: your workspace
+3. Go to **OAuth & Permissions**
+4. Add **User Token Scopes** (NOT bot scopes):
    - `channels:history` `channels:read`
    - `groups:history` `groups:read`
    - `im:history` `im:read`
    - `mpim:history` `mpim:read`
-   - `search:read` `users:read` `chat:write`
-5. **Install to Workspace** → admin 승인 시 자동, 아니면 admin 요청
-6. **User OAuth Token** (xoxp-...로 시작) 복사
+   - `users:read` (author names)
+   - `search:read` (mention search), `chat:write` (sending) — optional
+5. **Install to Workspace** (org admins may require approval)
+6. Copy the **User OAuth Token** (starts with `xoxp-`)
 
 ### 2. Link
+
 ```bash
 python3 slack link xoxp-...
 ```
 
+The token is stored in `.user` (mode 0600), which is gitignored.
+
 ## Usage
 
 ```bash
-python3 slack whoami              # 본인 정보
-python3 slack channels            # 가입 채널 list
-python3 slack mentions [--days N] # @mention 최근 N일
-python3 slack dms                 # 모든 DM unread count
-python3 slack history #general --limit 20
-python3 slack send @mingyu "GRAM amortized EM 노트 정리 중"
-python3 slack send #general "공지"
+python3 slack whoami                       # account info
+python3 slack channels                     # joined channels
+python3 slack history "#some-channel" --limit 20
+python3 slack mentions --days 3            # needs search:read
+python3 slack dms                          # DM unread counts (needs users:read)
+python3 slack send "#some-channel" "msg"   # needs chat:write
 ```
+
+The skill degrades gracefully: if a scope is missing (e.g. `users:read`),
+reads still work and author names fall back to user IDs.
 
 ## Architecture
 
 - **API**: Slack Web API (`slack.com/api/*`)
 - **Auth**: User OAuth Token (Bearer header)
-- **Storage**: `.user` (mode 0o600) — `token`, `team`, `user_id`
+- **Storage**: `.user` (mode 0600) — token + cached team/user_id
 - **No dependencies**: stdlib only (urllib + json)
-
-## Integration with The System
-
-7번째 context source (sweep cron, wake cron):
-- `mentions` — @mention + DM 새 메시지 → Tasks Daily 자동 시드 ("(slack)" marker)
-- `dms` — unread count 1줄 보고
-- `send` — agent 명령으로 직접 답장 가능
 
 ## License
 
